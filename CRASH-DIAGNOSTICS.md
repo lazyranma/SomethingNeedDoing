@@ -76,10 +76,17 @@ hooks и оборачивает `__gc` только на наблюдавших�
 
 ## Проверка и сборка
 
+Пауза Lua- и native-макросов теперь ожидается асинхронно, чтобы не блокировать
+игровой framework-поток до нажатия Resume/Stop. Это исправляет зависание при
+паузе уже запланированного, но ещё не начавшего исполняться дочернего макроса.
+Во время паузы состояние проверяется каждые 25 мс; работающий макрос не получает
+дополнительной задержки. Исходный сбой GC, описанный выше, остаётся предметом диагностики.
+
 Из корня репозитория `SomethingNeedDoing`:
 
 ```powershell
 dotnet run --project tests/LuaCrashDiagnostics
+pwsh -NoProfile -ExecutionPolicy Bypass -File tests/MacroPause/Run.ps1
 dotnet build SomethingNeedDoing/SomethingNeedDoing.csproj -c Debug -p:UseSharedCompilation=false -p:DebugType=portable -p:DebugSymbols=true
 ```
 
@@ -87,6 +94,12 @@ dotnet build SomethingNeedDoing/SomethingNeedDoing.csproj -c Debug -p:UseSharedC
 Проверяются корутины, очистка и закрытие среды, запись до исходного GetHashCode,
 отсутствие дополнительного хеширования/форматирования игровых объектов,
 наблюдение SubKinds, отказ журнала, немедленная запись и ротация.
+
+Тест `MacroPause` извлекает исполняемые циклы из обоих движков и компилирует их
+вместе с настоящим `MacroPause.cs` в изолированном планировщике framework-потока.
+Старый блокирующий wait воспроизводит зависание; исправленные циклы проверяются
+на отзывчивость при паузе, Resume/Stop, отмену и сохранение игрового потока для
+Lua-вызовов и native-команд. Игра и DLL Dalamud для этого теста не нужны.
 
 Два выражения копирования словарей в `MetadataParser` заменены на эквивалентные
 конструкторы `new(dictionary)`: исходный синтаксис `with(...)` не компилируется
