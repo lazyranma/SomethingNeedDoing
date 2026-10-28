@@ -689,6 +689,15 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
         public void Dispose()
         {
+            // Disposing a CTS does not mark it cancelled, so the engine loop
+            // (`while (!token.IsCancellationRequested)`) would keep ticking after
+            // plugin unload. Signal cancellation before releasing resources.
+            PauseEvent.Set();
+            try
+            {
+                CancellationSource.Cancel();
+            }
+            catch (ObjectDisposedException) { }
             CancellationSource.Dispose();
             PauseEvent.Dispose();
         }
