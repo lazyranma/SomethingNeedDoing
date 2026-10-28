@@ -698,6 +698,7 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
     private void OnMacroStateChanged(object? sender, MacroStateChangedEventArgs e)
     {
+        _luaEngine.TraceLua(e.MacroId, $"STATE {e.PreviousState} -> {e.NewState}");
         MacroStateChanged?.Invoke(sender, e);
 
         if (e.NewState is MacroState.Completed or MacroState.Error)
@@ -805,7 +806,8 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
             if (_macroStates.ContainsKey(macro.Id))
             {
-                FrameworkLogger.Debug($"Skipping trigger event for macro {macro.Name} - cannot start");
+                FrameworkLogger.Debug($"Skipping trigger event for macro {macro.Name} [{macro.Id}] - already tracked, state={macro.State}, event={e.EventType}");
+                _luaEngine.TraceLua(macro.Id, $"TRIGGER-SKIPPED state={macro.State} event={e.EventType}");
                 return;
             }
 
@@ -842,7 +844,9 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
                 // This happens the first few frames if you have a trigger like OnUpdate
                 try
                 {
+                    nluaEngine.TraceLua(e.MacroId, $"BEGIN trigger-probe function={e.FunctionName}");
                     var exists = lua.DoString($"return {e.FunctionName} ~= nil")[0] as bool?;
+                    nluaEngine.TraceLua(e.MacroId, $"END trigger-probe function={e.FunctionName}");
                     if (exists != true)
                     {
                         FrameworkLogger.Debug($"Skipping function {e.FunctionName} for macro {e.MacroId} - function not yet defined in Lua environment");
@@ -856,8 +860,10 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
                 }
 
                 FrameworkLogger.Verbose($"Executing function {e.FunctionName} in macro {macro.Name}");
+                nluaEngine.TraceLua(e.MacroId, $"BEGIN trigger function={e.FunctionName} event={e.TriggerArgs.EventType}");
                 lua.SetTriggerEventData(e.TriggerArgs);
                 lua.DoString($"{e.FunctionName}()"); // call in the parent's lua state
+                nluaEngine.TraceLua(e.MacroId, $"END trigger function={e.FunctionName}");
             }
             else
                 FrameworkLogger.Debug($"Skipping function {e.FunctionName} for stopped macro {e.MacroId}");
@@ -989,6 +995,8 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
     private void OnConditionChange(ConditionFlag flag, bool value)
     {
+        if (flag is ConditionFlag.BetweenAreas or ConditionFlag.BetweenAreas51)
+            _luaEngine.TraceLifecycle($"condition={flag} value={value}");
         var eventData = new Dictionary<string, object> { { "flag", flag }, { "value", value } };
         FrameworkLogger.Verbose($"[{nameof(OnConditionChange)}] fired [{flag}, {value}]");
         _ = _triggerEventManager.RaiseTriggerEvent(TriggerEvent.OnConditionChange, eventData);
@@ -996,6 +1004,7 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
     private void OnTerritoryChanged(uint territoryType)
     {
+        _luaEngine.TraceLifecycle($"territory-change={territoryType}");
         var eventData = new Dictionary<string, object> { { "territoryType", territoryType } };
         FrameworkLogger.Verbose($"[{nameof(OnTerritoryChanged)}] fired [{territoryType}]");
         _ = _triggerEventManager.RaiseTriggerEvent(TriggerEvent.OnTerritoryChange, eventData);
@@ -1010,12 +1019,14 @@ public partial class MacroScheduler : IMacroScheduler, IDisposable
 
     private void OnLogin()
     {
+        _luaEngine.TraceLifecycle("login");
         FrameworkLogger.Verbose($"[{nameof(OnLogin)}] fired");
         _ = _triggerEventManager.RaiseTriggerEvent(TriggerEvent.OnLogin);
     }
 
     private void OnLogout(int type, int code)
     {
+        _luaEngine.TraceLifecycle($"logout type={type} code={code}");
         var eventData = new Dictionary<string, object> { { "type", type }, { "code", code } };
         FrameworkLogger.Verbose($"[{nameof(OnLogout)}] fired [{type}, {code}]");
         _ = _triggerEventManager.RaiseTriggerEvent(TriggerEvent.OnLogout, eventData);

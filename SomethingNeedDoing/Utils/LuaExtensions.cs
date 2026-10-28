@@ -7,7 +7,8 @@ namespace SomethingNeedDoing.Utils;
 
 public static class LuaExtensions
 {
-    public static object[] LoadEntryPointWrappedScript(this Lua lua, string script) => lua.DoString(string.Format(LuaCodeSnippets.EntrypointTemplate, script));
+    public static object[] LoadEntryPointWrappedScript(this Lua lua, string script, string chunkName = "chunk")
+        => lua.DoString(string.Format(LuaCodeSnippets.EntrypointTemplate, script), chunkName);
     public static void LoadFStrings(this Lua lua) => lua.DoString(LuaCodeSnippets.FStringSnippet);
 
     /// <summary>

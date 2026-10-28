@@ -40,6 +40,30 @@ public partial class NLuaMacroEngine : IMacroEngine
 
     private readonly ConcurrentDictionary<string, TemporaryMacro> _temporaryMacros = [];
     private readonly ConcurrentDictionary<string, Lua> _activeLuaEnvironments = [];
+    private readonly ConcurrentDictionary<string, LuaCrashDiagnostics> _crashDiagnostics = [];
+    private readonly Lazy<LuaCrashLog> _crashLog = new(() => new LuaCrashLog(
+        System.IO.Path.Combine(Svc.PluginInterface.ConfigDirectory.FullName, "diagnostics")));
+
+    internal void TraceLua(string macroId, string phase)
+    {
+        if (_crashDiagnostics.TryGetValue(macroId, out var diagnostics)) diagnostics.Record(phase);
+    }
+
+    internal void TraceLifecycle(string reason)
+    {
+        if (!LuaCrashDiagnostics.Enabled) return;
+        try
+        {
+            var context = $"LIFECYCLE {reason} loggedIn={Svc.ClientState.IsLoggedIn} territory={Svc.ClientState.TerritoryType} " +
+                $"betweenAreas={Svc.Condition[ConditionFlag.BetweenAreas]} betweenAreas51={Svc.Condition[ConditionFlag.BetweenAreas51]}";
+            _crashLog.Value.Write(context + $" activeLua={_crashDiagnostics.Count}");
+            foreach (var diagnostics in _crashDiagnostics.Values) diagnostics.Record(context);
+        }
+        catch (Exception ex)
+        {
+            FrameworkLogger.Warning($"Could not record Lua lifecycle diagnostics: {ex.Message}");
+        }
+    }
 
     /// <inheritdoc/>
     public IMacro? GetTemporaryMacro(string macroId) => _temporaryMacros.TryGetValue(macroId, out var macro) ? macro : null;
@@ -79,11 +103,26 @@ public partial class NLuaMacroEngine : IMacroEngine
     private async Task ExecuteMacro(MacroInstance macro, IMacroInstance instance, CancellationToken token, TriggerEventArgs? triggerArgs = null, int _ = 0)
     {
         Lua? lua = null;
+        LuaCrashDiagnostics? diagnostics = null;
         try
         {
             FrameworkLogger.Verbose($"Starting Lua macro execution for macro {macro.Macro.Id}");
             lua = new Lua();
             lua.State.Encoding = Encoding.UTF8;
+            if (LuaCrashDiagnostics.Enabled)
+            {
+                try
+                {
+                    diagnostics = new LuaCrashDiagnostics(lua, macro.Macro.Id, macro.Macro.Name, _crashLog.Value.Write);
+                    _crashDiagnostics[macro.Macro.Id] = diagnostics;
+                    var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(macro.Macro.ContentSansMetadata())));
+                    diagnostics.Record($"SETUP trigger={triggerArgs?.EventType.ToString() ?? "manual"} scriptSha256={hash} entrypointLineOffset=4");
+                }
+                catch (Exception ex)
+                {
+                    FrameworkLogger.Warning($"Could not attach Lua crash diagnostics: {ex.Message}");
+                }
+            }
 
             lua.LoadCLRPackage();
             lua.LoadFStrings();
@@ -119,13 +158,17 @@ public partial class NLuaMacroEngine : IMacroEngine
 
             _activeLuaEnvironments[macro.Macro.Id] = lua; // for function triggers to access the same state
 
+            diagnostics?.Begin("dependencies");
             await LoadDependenciesIntoScope(lua, macro.Macro);
+            diagnostics?.End("dependencies");
             await Svc.Framework.RunOnTick(async () =>
             {
                 try
                 {
                     // Execute the script
-                    var results = lua.LoadEntryPointWrappedScript(macro.Macro.ContentSansMetadata());
+                    diagnostics?.Begin("load-entrypoint");
+                    var results = lua.LoadEntryPointWrappedScript(macro.Macro.ContentSansMetadata(), $"@snd/{macro.Macro.Id}/entrypoint");
+                    diagnostics?.End("load-entrypoint");
                     if (results.Length == 0 || results[0] is not LuaFunction func)
                         throw new LuaException("Failed to load Lua script: No function returned");
 
@@ -143,7 +186,9 @@ public partial class NLuaMacroEngine : IMacroEngine
 
                             var (macroComplete, result) = await Svc.Framework.RunOnTick(() =>
                             {
+                                diagnostics?.Begin("resume");
                                 var result = macro.LuaGenerator.Call();
+                                diagnostics?.End($"resume results={result.Length}");
                                 return (result.Length == 0, result);
                             });
 
@@ -198,7 +243,9 @@ public partial class NLuaMacroEngine : IMacroEngine
                 }
                 finally
                 {
-                    await ExecuteCleanupFunctions(lua, macro.Macro);
+                    diagnostics?.Begin("cleanup");
+                    await ExecuteCleanupFunctions(lua, macro.Macro, diagnostics);
+                    diagnostics?.End("cleanup");
                 }
             }, cancellationToken: token).ConfigureAwait(false);
         }
@@ -220,7 +267,9 @@ public partial class NLuaMacroEngine : IMacroEngine
             {
                 try
                 {
+                    diagnostics?.Begin("dispose");
                     lua.Dispose();
+                    diagnostics?.Record("END dispose");
                 }
                 catch (Exception ex)
                 {
@@ -228,12 +277,17 @@ public partial class NLuaMacroEngine : IMacroEngine
                 }
             }
 
+            // The hook delegate must stay rooted until lua_close has finished running __gc.
+            GC.KeepAlive(diagnostics);
+            _crashDiagnostics.TryRemove(macro.Macro.Id, out var removedDiagnostics);
+
             macro.LuaGenerator = null;
         }
     }
 
     protected virtual void OnMacroError(IMacro macro, string message, Exception? ex = null)
     {
+        TraceLua(macro.Id, $"ERROR {message} exception={ex?.GetType().FullName} message={ex?.Message}");
         Svc.Chat.PrintErrorMsg(message);
         FrameworkLogger.Error($"Error executing macro {macro.Name} [{macro.Id}]: {ex}");
         MacroError?.Invoke(this, new MacroErrorEventArgs(macro.Id, message, ex));
@@ -256,7 +310,9 @@ public partial class NLuaMacroEngine : IMacroEngine
             try
             {
                 var content = await dependency.GetContentAsync();
-                lua.DoString(content);
+                TraceLua(macro.Id, $"BEGIN dependency={dependency.Name}");
+                lua.DoString(content, $"@snd/{macro.Id}/dependency/{dependency.Name}");
+                TraceLua(macro.Id, $"END dependency={dependency.Name}");
                 FrameworkLogger.Debug($"Loaded dependency {dependency.Name} into Lua scope for macro {macro.Name}");
             }
             catch (Exception ex)
@@ -268,14 +324,17 @@ public partial class NLuaMacroEngine : IMacroEngine
     }
 
     /// <inheritdoc/>
-    public void Dispose() { }
+    public void Dispose()
+    {
+        if (_crashLog.IsValueCreated) _crashLog.Value.Dispose();
+    }
 
     /// <summary>
     /// Executes cleanup functions for a macro.
     /// </summary>
     /// <param name="lua">The Lua environment.</param>
     /// <param name="macro">The macro to execute cleanup for.</param>
-    private async Task ExecuteCleanupFunctions(Lua lua, IMacro macro)
+    private async Task ExecuteCleanupFunctions(Lua lua, IMacro macro, LuaCrashDiagnostics? diagnostics)
     {
         if (macro is TemporaryMacro) return;
 
@@ -286,7 +345,7 @@ public partial class NLuaMacroEngine : IMacroEngine
         {
             try
             {
-                var results = lua.LoadEntryPointWrappedScript($@"{functionName}()");
+                var results = lua.LoadEntryPointWrappedScript($@"{functionName}()", $"@snd/{macro.Id}/cleanup/{functionName}");
                 if (results.Length == 0 || results[0] is not LuaFunction func)
                 {
                     FrameworkLogger.Error($"Failed to load cleanup function {functionName}");
@@ -304,7 +363,9 @@ public partial class NLuaMacroEngine : IMacroEngine
                             break;
                         }
 
+                        diagnostics?.Begin($"cleanup-function={functionName}");
                         var result = func.Call();
+                        diagnostics?.End($"cleanup-function={functionName} results={result.Length}");
                         if (result.Length == 0)
                         {
                             FrameworkLogger.Debug($"Cleanup function {functionName} completed");

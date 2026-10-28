@@ -123,7 +123,7 @@ public partial class MetadataParser
                     foreach (var prev in previousMetadata.Configs)
                         preservedValues[prev.Key] = prev.Value.Value;
 
-                    metadata.Configs = [with(parsedConfigs)]; // make new
+                    metadata.Configs = new(parsedConfigs); // make new
 
                     foreach (var prev in previousMetadata.Configs) // add any not present in new
                         if (!metadata.Configs.ContainsKey(prev.Key))
@@ -138,7 +138,7 @@ public partial class MetadataParser
             }
             else if (previousMetadata != null)
                 // no configs in content = keep whatever was already in metadata
-                metadata.Configs = [with(previousMetadata.Configs)];
+                metadata.Configs = new(previousMetadata.Configs);
         }
         catch (Exception ex)
         {

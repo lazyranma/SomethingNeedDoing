@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NLua" Version="1.7.9" />
+    <Compile Include="../../SomethingNeedDoing/LuaMacro/LuaCrashDiagnostics.cs" Link="LuaCrashDiagnostics.cs" />
+    <Compile Include="../../SomethingNeedDoing/LuaMacro/LuaCrashLog.cs" Link="LuaCrashLog.cs" />
+  </ItemGroup>
+</Project>
