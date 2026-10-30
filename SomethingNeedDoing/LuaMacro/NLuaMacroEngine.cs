@@ -41,6 +41,7 @@ public partial class NLuaMacroEngine : IMacroEngine
     private readonly ConcurrentDictionary<string, TemporaryMacro> _temporaryMacros = [];
     private readonly ConcurrentDictionary<string, Lua> _activeLuaEnvironments = [];
     private readonly ConcurrentDictionary<string, LuaCrashDiagnostics> _crashDiagnostics = [];
+    private volatile bool _isShuttingDown;
     private readonly Lazy<LuaCrashLog> _crashLog = new(() => new LuaCrashLog(
         System.IO.Path.Combine(Svc.PluginInterface.ConfigDirectory.FullName, "diagnostics")));
 
@@ -48,6 +49,8 @@ public partial class NLuaMacroEngine : IMacroEngine
     {
         if (_crashDiagnostics.TryGetValue(macroId, out var diagnostics)) diagnostics.Record(phase);
     }
+
+    internal void BeginShutdown() => _isShuttingDown = true;
 
     internal void TraceLifecycle(string reason)
     {
@@ -166,6 +169,7 @@ public partial class NLuaMacroEngine : IMacroEngine
                 try
                 {
                     // Execute the script
+                    token.ThrowIfCancellationRequested();
                     diagnostics?.Begin("load-entrypoint");
                     var results = lua.LoadEntryPointWrappedScript(macro.Macro.ContentSansMetadata(), $"@snd/{macro.Macro.Id}/entrypoint");
                     diagnostics?.End("load-entrypoint");
@@ -190,7 +194,9 @@ public partial class NLuaMacroEngine : IMacroEngine
                                 var result = macro.LuaGenerator.Call();
                                 diagnostics?.End($"resume results={result.Length}");
                                 return (result.Length == 0, result);
-                            });
+                            }, cancellationToken: token);
+
+                            token.ThrowIfCancellationRequested();
 
                             if (macroComplete)
                                 break;
@@ -213,7 +219,7 @@ public partial class NLuaMacroEngine : IMacroEngine
 
                             MacroStepCompleted?.Invoke(this, new MacroStepCompletedEventArgs(macro.Macro.Id, 1, 1));
 
-                            await Svc.Framework.DelayTicks(1);
+                            await Svc.Framework.RunOnTick(() => true, cancellationToken: token);
                         }
                         catch (OperationCanceledException)
                         {
@@ -244,7 +250,8 @@ public partial class NLuaMacroEngine : IMacroEngine
                 finally
                 {
                     diagnostics?.Begin("cleanup");
-                    await ExecuteCleanupFunctions(lua, macro.Macro, diagnostics);
+                    if (!_isShuttingDown)
+                        await ExecuteCleanupFunctions(lua, macro.Macro, diagnostics);
                     diagnostics?.End("cleanup");
                 }
             }, cancellationToken: token).ConfigureAwait(false);
@@ -336,13 +343,14 @@ public partial class NLuaMacroEngine : IMacroEngine
     /// <param name="macro">The macro to execute cleanup for.</param>
     private async Task ExecuteCleanupFunctions(Lua lua, IMacro macro, LuaCrashDiagnostics? diagnostics)
     {
-        if (macro is TemporaryMacro) return;
+        if (_isShuttingDown || macro is TemporaryMacro) return;
 
         var cleanupFunctions = GetCleanupFunctions(macro.Id);
         if (cleanupFunctions.Count == 0) return;
 
         foreach (var functionName in cleanupFunctions)
         {
+            if (_isShuttingDown) break;
             try
             {
                 var results = lua.LoadEntryPointWrappedScript($@"{functionName}()", $"@snd/{macro.Id}/cleanup/{functionName}");
@@ -357,6 +365,7 @@ public partial class NLuaMacroEngine : IMacroEngine
                     // TODO: don't duplicate logic from executemacro?
                     while (true)
                     {
+                        if (_isShuttingDown) break;
                         if (func == null)
                         {
                             FrameworkLogger.Debug($"Cleanup function {functionName} completed (func is null)");
